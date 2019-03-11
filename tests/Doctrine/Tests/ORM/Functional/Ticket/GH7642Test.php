@@ -27,13 +27,26 @@ class GH7642Test extends OrmFunctionalTestCase
                 $this->_em->getClassMetadata(GH7642UserEntity::class),
             ]
         );
+
         $this->limit = 25000;
     }
 
-    private function getRawQueryMemoryFootprint() : float {
+    private function clearMemory() {
+        $this->_em->clear();
+        gc_collect_cycles();
+    }
+
+    private function getMemoryFootprint() {
+        return memory_get_peak_usage(true) / 1000000;
+    }
+
+    private function runRawQuery() : void {
 
         // iterate over results
+        $conn = $this->_em->getConnection();
         $repo = $this->_em->getRepository(GH7642Entity::class);
+        $query = $repo->createNamedQuery('count_points');
+        $sql = $query->getSQL();
         $batchSize = 2000;
         $page = 1;
 
@@ -43,36 +56,29 @@ class GH7642Test extends OrmFunctionalTestCase
             $qb = $repo->createQueryBuilder('u');
             $qb->setFirstResult($offset);
             $qb->setMaxResults($batchSize);
+            $qb->setCacheable(false);
             $data = $qb->getQuery()->getResult();
 
             foreach($data as $entity) {
 
-                $query = $repo->createNamedQuery('count_points');
-                $query->setParameter('user', $entity->user->id);
-                $query->setCacheable(false);
-
                 // bypass named query execution through doctrine for memory saving
-                $sql = $query->getSQL();
-                $conn = $this->_em->getConnection();
                 $stmt = $conn->prepare($sql);
                 $stmt->execute([$entity->user->id]);
-                unset($query);
 
-                return (int)$stmt->fetch(\PDO::FETCH_COLUMN);
-
+                $stmt->fetch(\PDO::FETCH_COLUMN);
+                unset($stmt);
 
             }
-            $this->_em->clear();
+
+            unset($data);
 
             $page++;
 
         } while($offset < $this->limit);
 
-        return memory_get_peak_usage(true) / 1000000; // in MB
-
     }
 
-    private function getNamedQueryMemoryootprint() : float {
+    private function runNamedQuery() : void {
 
         // iterate over results
         $repo = $this->_em->getRepository(GH7642Entity::class);
@@ -85,6 +91,7 @@ class GH7642Test extends OrmFunctionalTestCase
             $qb = $repo->createQueryBuilder('u');
             $qb->setFirstResult($offset);
             $qb->setMaxResults($batchSize);
+            $qb->setCacheable(false);
             $data = $qb->getQuery()->getResult();
 
             foreach($data as $entity) {
@@ -96,13 +103,12 @@ class GH7642Test extends OrmFunctionalTestCase
                 $query->getSingleScalarResult();
 
             }
-            $this->_em->clear();
+
+            unset($data);
 
             $page++;
 
         } while($offset < $this->limit);
-
-        return memory_get_peak_usage(true) / 1000000; // in MB
 
     }
 
@@ -117,16 +123,14 @@ class GH7642Test extends OrmFunctionalTestCase
         }
 
         $this->_em->flush();
-        $this->_em->clear();
+        $this->clearMemory();
 
-        $rawQueryMemory = $this->getRawQueryMemoryFootprint();
+        $this->runRawQuery();
+        $rawQueryMemory = $this->getMemoryFootprint();
+        $this->clearMemory();
 
-        // clear all
-        $this->_em->flush();
-        $this->_em->clear();
-        gc_collect_cycles();
-
-        $namedQueryMemory = $this->getNamedQueryMemoryootprint();
+        $this->runNamedQuery();
+        $namedQueryMemory = $this->getMemoryFootprint();
 
         // lets assume that named query should use 2x more memory at most.
         $this->assertLessThanOrEqual($rawQueryMemory*2, $namedQueryMemory);
